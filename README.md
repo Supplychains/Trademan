@@ -1,4 +1,4 @@
-# Аукционный бот : автодеплой в Yandex Cloud (шаг за шагом)
+# Аукционный бот : автодеплой  в Yandex Cloud (шаг за шагом)
 
 Этот репозиторий уже готов к автодеплою: Docker + Yandex Cloud Serverless Containers + GitHub Actions.
 
