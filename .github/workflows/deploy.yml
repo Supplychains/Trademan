@@ -1,0 +1,74 @@
+name: Deploy to Yandex Cloud
+
+on:
+  push:
+    branches: [ main ]   # если у тебя ветка master — замени main на master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: auction-bot
+      REGISTRY_NAME: auction-reg
+      CONTAINER_NAME: auction-bot
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yc CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "${HOME}/yandex-cloud/bin" >> $GITHUB_PATH
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Configure yc with SA key
+        run: |
+          echo '${{ secrets.YC_SA_JSON }}' > key.json
+          yc config set cloud-id ${{ secrets.YC_CLOUD_ID }}
+          yc config set folder-id ${{ secrets.YC_FOLDER_ID }}
+          yc config set service-account-key key.json
+
+      - name: Get or create registry
+        id: reg
+        run: |
+          set -e
+          REG_ID=$(yc container registry get --name "$REGISTRY_NAME" --format json | jq -r .id || true)
+          if [ -z "$REG_ID" ] || [ "$REG_ID" = "null" ]; then
+            yc container registry create --name "$REGISTRY_NAME"
+            REG_ID=$(yc container registry get --name "$REGISTRY_NAME" --format json | jq -r .id)
+          fi
+          echo "REG_ID=$REG_ID" >> $GITHUB_OUTPUT
+
+      - name: Docker login to YCR
+        run: yc container registry configure-docker
+
+      - name: Build & Push
+        run: |
+          IMAGE="cr.yandex/${{ steps.reg.outputs.REG_ID }}/${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Ensure serverless container exists
+        run: |
+          yc serverless container get --name $CONTAINER_NAME || yc serverless container create --name $CONTAINER_NAME
+          yc serverless container allow-unauthenticated-invoke --name $CONTAINER_NAME || true
+
+      - name: Deploy revision
+        run: |
+          yc serverless container revision deploy \
+            --container-name $CONTAINER_NAME \
+            --image $IMAGE \
+            --cores 1 --memory 512M --concurrency 1 --execution-timeout 30s \
+            --env BOT_TOKEN='${{ secrets.BOT_TOKEN }}' \
+            --env WEBHOOK_SECRET='${{ secrets.WEBHOOK_SECRET }}' \
+            --env PORT=8080
+
+      - name: Set webhook
+        run: |
+          PUBLIC_URL=$(yc serverless container get --name $CONTAINER_NAME --format json | jq -r .http_invoke_url)
+          curl -X POST "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/setWebhook" \
+            -F "url=${PUBLIC_URL}/${{ secrets.WEBHOOK_SECRET }}" \
+            -F "secret_token=${{ secrets.WEBHOOK_SECRET }}" \
+            -F "drop_pending_updates=true"
